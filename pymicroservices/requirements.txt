@@ -1,5 +1,6 @@
 SQLAlchemy[asyncio]==2.1.6
 asyncpg==0.32.0
+psycopg[binary]==3.2.6
 pydantic==2.14.1
 pydantic-settings==2.16.1
 boto3==1.43.118
@@ -8,8 +9,10 @@ aiokafka==0.14.0
 pgvector==0.5.1
 alembic==1.20.1
 fastapi==0.162.0
-uvicorn==0.54.0
+uvicorn[standard]==0.54.0
 python-multipart==0.0.32
 pypdf==6.21.2
+cryptography==44.0.2
+httpx==0.28.1
 torch==2.14.1
 transformers==5.20.2

@@ -1,0 +1,60 @@
+# Render Blueprint: New -> Blueprint -> pick this repo. Values marked `sync: false` are
+# secrets you type into the Render dashboard; they never live in git.
+# Document processing runs in the separate consumers repository, fed through Kafka.
+services:
+  - type: web
+    name: lexaior-api
+    runtime: docker
+    region: singapore          # same region as the Supabase project (ap-southeast-1)
+    plan: free                 # free sleeps after ~15 min idle (slow first request); use starter for real users
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: staging         # all production safety checks except the WorkOS live key
+      - key: AUTH_PROVIDER
+        value: workos
+      - key: DB_SCHEMA
+        value: lexaior
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: TRUST_PROXY_HEADERS
+        value: "true"          # client IP comes from the Cloudflare Worker's X-Forwarded-For
+      - key: ADMIN_REQUIRE_MFA
+        value: "true"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PROXY_SECRET      # copy this value into the Cloudflare Worker's PROXY_SECRET
+        generateValue: true
+      - key: DATABASE_URL      # Supabase session pooler URL (port 5432), with ?sslmode=require
+        sync: false
+      - key: WORKOS_API_KEY
+        sync: false
+      - key: WORKOS_CLIENT_ID
+        sync: false
+      - key: APP_URL           # https://lawyer.<your-subdomain>.workers.dev
+        sync: false
+      - key: CORS_ORIGINS      # ["https://lawyer.<your-subdomain>.workers.dev"]
+        sync: false
+      # S3-compatible storage (bucket CORS must allow PUT and GET from APP_URL)
+      - key: STORAGE_PROVIDER
+        value: s3
+      - key: STORAGE_ENDPOINT_URL
+        sync: false
+      - key: STORAGE_BUCKET
+        sync: false
+      - key: STORAGE_REGION
+        sync: false
+      - key: STORAGE_ACCESS_KEY
+        sync: false
+      - key: STORAGE_SECRET_KEY
+        sync: false
+      # Valkey (progress streams) and Kafka (consumer wake-ups)
+      - key: VALKEY_HOST
+        sync: false
+      - key: VALKEY_PORT
+        sync: false
+      - key: VALKEY_PASSWORD
+        sync: false
+      - key: KAFKA_BOOTSTRAP_SERVERS
+        sync: false

@@ -1,13 +1,13 @@
 """Document parsing summary for status responses.
-Revision ID: 0003
-Revises: 0002
+Revision ID: 0005
+Revises: 0004
 """
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision = '0003'
-down_revision = '0002'
+revision = '0005'
+down_revision = '0004'
 branch_labels = None
 depends_on = None
 

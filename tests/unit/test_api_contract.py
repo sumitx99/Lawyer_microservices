@@ -8,7 +8,8 @@ def test_ids_are_required_in_payloads_not_urls():
     schema = create_app(settings).openapi()
     expected = {'/documents', '/documents/list', '/documents/status', '/documents/events'}
     assert expected.issubset(schema['paths'])
-    assert all('{' not in path for path in schema['paths'])
+    # The RAG routes; the website's /api routes (sign-in, matters, collections) use path ids.
+    assert all('{' not in path for path in schema['paths'] if not path.startswith('/api/'))
     for path in expected:
         operation = schema['paths'][path]['post']
         assert operation['requestBody']['required']

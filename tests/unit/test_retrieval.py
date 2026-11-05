@@ -105,6 +105,8 @@ def test_cache_path_is_independent_of_working_directory(tmp_path, monkeypatch):
 
 def test_embedding_matches_kafka_contract_and_mock_vector(monkeypatch):
     worker = Path(__file__).resolve().parents[3] / 'kafka/pyconsumers/helpers/embedding_helper.py'
+    if not worker.exists():
+        pytest.skip('Needs the consumers repository checked out next to this one (../kafka).')
     spec = importlib.util.spec_from_file_location('worker_embedding', worker)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
