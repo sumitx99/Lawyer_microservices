@@ -1,14 +1,14 @@
 """rag_foundation
-Revision ID: 0001
-Revises: 
+Revision ID: 0003
+Revises: 0002
 """
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 from pgvector.sqlalchemy import Vector
 
-revision = '0001'
-down_revision = None
+revision = '0003'
+down_revision = '0002'
 branch_labels = None
 depends_on = None
 

@@ -93,17 +93,40 @@ class ThreadService:
             async with asyncio.timeout(1):
                 await self.cache.client.publish(self.channel(thread_id), 'changed')
 
-    async def create(self, user_id, request):
-        if len(request.files) > self.settings.thread_max_files:
+    def declare(self, files):
+        """Validated declared files, minus repeats of the same content within this request."""
+        if len(files) > self.settings.thread_max_files:
             raise UploadError(f'A folder can hold at most {self.settings.thread_max_files} files.', 413)
         declared, skipped, seen = [], [], set()
-        for item in request.files:
+        for item in files:
             file = validate_declared_file(item.file_name, item.byte_count, item.sha256, self.settings.thread_max_file_bytes)
             if file.sha256 in seen:
                 skipped.append(SkippedFile(file_name=file.file_name, reason='Same content as another file in this folder.'))
                 continue
             seen.add(file.sha256)
             declared.append(file)
+        return declared, skipped
+
+    @staticmethod
+    def new_row(thread_id, file):
+        doc_id = uuid4()
+        return UnstructuredData(
+            id=doc_id, thread_id=thread_id, file_name=file.file_name, file_type=file.kind.file_type,
+            category=file.kind.category, byte_count=file.byte_count, sha256=file.sha256,
+            s3_path=f'THREAD_{thread_id}/{file.kind.file_type}/doc_{doc_id}/{file.file_name}')
+
+    def targets(self, rows):
+        expires = self.settings.presign_expiry_seconds
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires)
+        targets = []
+        for row, file in rows:
+            url, headers = self.storage.presign_put(row.s3_path, file.kind.content_type, file.byte_count, file.sha256, expires)
+            targets.append(UploadTarget(doc_id=row.id, file_name=row.file_name, file_type=row.file_type,
+                                        upload_url=url, headers=headers, expires_at=expires_at))
+        return targets
+
+    async def create(self, user_id, request):
+        declared, skipped = self.declare(request.files)
         thread_id = uuid4()
         async with self.db.transaction() as session:
             if request.data_fabric_id is not None:
@@ -118,21 +141,43 @@ class ThreadService:
                 session.add(FabricUnstructuredThread(fabric_id=request.data_fabric_id, thread_id=thread_id))
             rows = []
             for file in declared:
-                doc_id = uuid4()
-                row = UnstructuredData(
-                    id=doc_id, thread_id=thread_id, file_name=file.file_name, file_type=file.kind.file_type,
-                    category=file.kind.category, byte_count=file.byte_count, sha256=file.sha256,
-                    s3_path=f'THREAD_{thread_id}/{file.kind.file_type}/doc_{doc_id}/{file.file_name}')
+                row = self.new_row(thread_id, file)
                 session.add(row)
                 rows.append((row, file))
-        expires = self.settings.presign_expiry_seconds
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires)
-        targets = []
-        for row, file in rows:
-            url, headers = self.storage.presign_put(row.s3_path, file.kind.content_type, file.byte_count, file.sha256, expires)
-            targets.append(UploadTarget(doc_id=row.id, file_name=row.file_name, file_type=row.file_type,
-                                        upload_url=url, headers=headers, expires_at=expires_at))
-        return ThreadCreateResponse(thread_id=thread_id, status='UPLOADING', files=targets, skipped=skipped)
+        return ThreadCreateResponse(thread_id=thread_id, status='UPLOADING', files=self.targets(rows), skipped=skipped)
+
+    async def add_files(self, thread_id, files):
+        """More files for an existing folder (a collection's folder grows over time).
+
+        Content already in the folder is skipped. A file with the same content whose earlier upload
+        never completed (or was rejected) is replaced, so the same file can simply be uploaded again."""
+        declared, skipped = self.declare(files)
+        stale_keys = []
+        async with self.db.transaction() as session:
+            await get_thread(session, thread_id, lock=True)
+            existing = {row.sha256: row for row in await session.scalars(select(UnstructuredData).where(
+                UnstructuredData.thread_id == thread_id, UnstructuredData.sha256.in_([f.sha256 for f in declared]))
+                .with_for_update())}
+            rows = []
+            for file in declared:
+                old = existing.get(file.sha256)
+                if old is not None and old.upload_status == 'COMPLETED':
+                    skipped.append(SkippedFile(file_name=file.file_name, reason='Same content is already in this folder.'))
+                    continue
+                if old is not None:
+                    stale_keys.append(old.s3_path)
+                    await session.delete(old)
+                    await session.flush()
+                row = self.new_row(thread_id, file)
+                session.add(row)
+                rows.append((row, file))
+            await session.flush()
+            status = await refresh_thread_status(session, thread_id)
+        for key in stale_keys:
+            with suppress(Exception):
+                await self.storage.delete(key)  # a partial or rejected object
+        await self.notify(thread_id)
+        return ThreadCreateResponse(thread_id=thread_id, status=status, files=self.targets(rows), skipped=skipped)
 
     async def check_object(self, row):
         """Returns (upload_status, error) for one file: RUNNING if not uploaded yet."""

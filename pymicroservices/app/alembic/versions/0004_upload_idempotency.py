@@ -1,12 +1,12 @@
 """Project-scoped upload idempotency keys.
-Revision ID: 0002
-Revises: 0001
+Revision ID: 0004
+Revises: 0003
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = '0002'
-down_revision = '0001'
+revision = '0004'
+down_revision = '0003'
 branch_labels = None
 depends_on = None
 

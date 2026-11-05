@@ -1,10 +1,14 @@
+.venv/
 .env
 .env.*
 !.env.example
+data/
 __pycache__/
 *.py[cod]
-.venv/
 .pytest_cache/
+pytest-cache-files-*/
 .coverage
 htmlcov/
 .DS_Store
+# The teammate repository this was merged from (has its own git history)
+teammate_code/

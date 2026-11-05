@@ -1,9 +1,10 @@
-"""S3-compatible object access, targeting SeaweedFS without AWS services."""
+"""S3-compatible object access: SeaweedFS locally, any S3 endpoint when hosted."""
 
 import asyncio
 import base64
 from dataclasses import dataclass
 import hashlib
+from urllib.parse import quote
 
 import boto3
 from botocore.config import Config
@@ -67,6 +68,12 @@ class Storage:
             'Bucket': self.bucket, 'Key': self._key(key), 'ContentType': content_type,
             'ContentLength': byte_count, 'ChecksumSHA256': checksum})
         return url, {'Content-Type': content_type, 'x-amz-checksum-sha256': checksum}
+
+    def presign_get(self, key, file_name, expires):
+        """A short-lived browser GET URL that downloads the object as an attachment named file_name."""
+        disposition = f"attachment; filename*=UTF-8''{quote(file_name, safe='')}"
+        return self.client.generate_presigned_url('get_object', ExpiresIn=expires, Params={
+            'Bucket': self.bucket, 'Key': self._key(key), 'ResponseContentDisposition': disposition})
 
     async def inspect(self, key) -> StoredObject | None:
         """HEAD with checksum; None when the object does not exist (yet)."""

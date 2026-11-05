@@ -4,16 +4,16 @@ project (data_fabric) -> folder (unstructured_thread) -> file (unstructured_data
 updated_at, attempts, error, owner and lease per stage) -> text_nodes, node_relationships,
 image_rag_vector_table and unstructured_metadata.
 
-Revision ID: 0005
-Revises: 0004
+Revision ID: 0007
+Revises: 0006
 """
 from alembic import op
 from pgvector.sqlalchemy import Vector
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision = '0005'
-down_revision = '0004'
+revision = '0007'
+down_revision = '0006'
 branch_labels = None
 depends_on = None
 
