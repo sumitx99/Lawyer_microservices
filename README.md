@@ -19,7 +19,7 @@ pymicroservices/app/
   services/        collections/ (collections <-> folders, search), firm/ (audit, rate limits, output),
                    threads/, retrigger/, retrieval/, projects/, rag/
   security/        roles, sessions, the route guard, the access engine
-  utilities/       settings (secrets_control), async + sync DB, S3 storage, Valkey, Kafka, validation
+  utilities/       settings (secrets_control), async DB (asyncpg), S3 storage, Valkey, Kafka, validation
   models.py        RAG tables          firm_models.py   firm, people, access and audit tables
   alembic/         one migration chain for both (applied on every start)
 scripts/           start-api.sh, create_firm.py, seed_dev.py
@@ -126,7 +126,15 @@ all `@morganlaw.test`.
 
 An upload into a collection goes `queued` → `processing` → `ready` while the worker runs; without it,
 files stay `queued`. Retrieval loads BGE-M3 and the reranker lazily from `EMBEDDING_CACHE_DIR` (no
-downloads at runtime); `torch` and `transformers` are only needed for search.
+downloads at runtime); `torch` and `transformers` are only needed for search. Retrieval settings
+(see `.env.example`): `EMBEDDING_CACHE_DIR`, `EMBEDDING_DEVICE` (`auto` = cuda, mps, else cpu),
+`RERANKER_ENABLED`, `RERANKER_MODEL`, `RERANKER_REVISION` (fp16 on GPU, fp32 on CPU; missing → RRF order,
+`reranked: false`), `RETRIEVAL_CANDIDATES` (per candidate list, default 50), `RETRIEVAL_RRF_K` (60),
+`RETRIEVAL_WARMUP` (load the models at startup). A missing embedder makes search answer 503.
+
+Retrieval eval (real BGE-M3 on a temporary fictional corpus, deleted afterwards; the fixtures are parsed
+in `../kafka/.venv`, which has Docling): `.venv/bin/python scripts/eval_retrieval.py --reranker off`
+and `--reranker on`, or `make eval-retrieval` for both.
 
 ## Tests
 

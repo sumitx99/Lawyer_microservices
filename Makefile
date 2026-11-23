@@ -1,4 +1,4 @@
-.PHONY: install migrate migration-check unit api integration serve seed
+.PHONY: install migrate migration-check unit api integration serve seed eval-retrieval
 
 serve:
 	.venv/bin/python -m uvicorn pymicroservices.app.main:create_app --factory --host 127.0.0.1 --port 8000 --reload --reload-dir pymicroservices
@@ -26,6 +26,10 @@ api:
 
 integration:
 	RAG_RUN_INTEGRATION=1 .venv/bin/python -m pytest tests/integration -q
+
+# Real BGE-M3 (+ reranker) on a temporary fictional corpus; fixtures are parsed in ../kafka/.venv (Docling).
+eval-retrieval:
+	.venv/bin/python scripts/eval_retrieval.py --reranker both
 
 # Explicit download only; obtain user approval before running.
 reranker-model:
