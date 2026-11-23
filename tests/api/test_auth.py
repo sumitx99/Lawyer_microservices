@@ -1,6 +1,8 @@
+from sqlalchemy import update
+
 from pymicroservices.app.firm_models import Firm
 from pymicroservices.app.security import crypto
-from tests.api.conftest import Api, SessionLocal, as_admin, as_user
+from tests.api.conftest import Api, as_admin, as_user, in_db
 
 
 def test_every_route_is_guarded():
@@ -9,9 +11,7 @@ def test_every_route_is_guarded():
 
 
 def test_invite_first_login_new_password_and_mfa_setup():
-    with SessionLocal() as db:
-        db.query(Firm).update({"require_mfa": True})
-        db.commit()
+    in_db(lambda db: db.execute(update(Firm).values(require_mfa=True)))
     admin = as_admin()
     r = admin.post("/api/admin/iam-users", {"email": "nina@morganlaw.test", "name": "Nina Lopez",
                                             "firm_role": "PARALEGAL"})

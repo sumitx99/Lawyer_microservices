@@ -1,6 +1,5 @@
 SQLAlchemy[asyncio]==2.1.6
 asyncpg==0.32.0
-psycopg[binary]==3.2.6
 pydantic==2.14.1
 pydantic-settings==2.16.1
 boto3==1.43.118

@@ -5,15 +5,15 @@ unstructured_data rows: uploaded with presigned PUTs, checked at complete-upload
 stage by stage by the consumers (standardization -> markdown/image -> metaclassifier).
 
 Access is decided by the collection (security/access.py) before anything here runs; the folder
-services below never see a request without it. The sync helpers serve the firm routes (lists,
-counts, the admin overview); the async ones wrap ThreadService/RetriggerService."""
+services below never see a request without it. The first helpers read through the firm routes' session
+(lists, counts, the admin overview); the folder operations wrap ThreadService/RetriggerService."""
 from collections import Counter
 from contextlib import suppress
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from pymicroservices.app.firm_models import Collection
 from pymicroservices.app.models import UnstructuredData, UnstructuredThread
@@ -66,36 +66,36 @@ def document_out(row) -> dict:
             "updated_at": row.updated_at.isoformat() if row.updated_at else None}
 
 
-# Sync reads for the firm routes -----------------------------------------------------------------
-def list_documents(db: Session, collection_id: str) -> list[UnstructuredData]:
-    return list(db.scalars(select(UnstructuredData).where(
+# Reads for the firm routes ---------------------------------------------------------------------
+async def list_documents(db: AsyncSession, collection_id: str) -> list[UnstructuredData]:
+    return list(await db.scalars(select(UnstructuredData).where(
         UnstructuredData.thread_id == thread_id(collection_id), UnstructuredData.upload_status != 'RUNNING')
         .order_by(UnstructuredData.created_at.desc(), UnstructuredData.id.desc())))
 
 
-def collection_counts(db: Session, collection_ids: list[str]) -> dict[str, int]:
+async def collection_counts(db: AsyncSession, collection_ids: list[str]) -> dict[str, int]:
     """Files per collection (uploads still in flight are not counted)."""
     ids = [thread_id(cid) for cid in collection_ids]
     if not ids:
         return {}
-    rows = db.execute(select(UnstructuredData.thread_id, func.count()).where(
+    rows = await db.execute(select(UnstructuredData.thread_id, func.count()).where(
         UnstructuredData.thread_id.in_(ids), UnstructuredData.upload_status != 'RUNNING')
         .group_by(UnstructuredData.thread_id))
     return {str(tid): n for tid, n in rows}
 
 
-def firm_document_statuses(db: Session, firm_id: str) -> dict[str, int]:
-    collection_ids = db.scalars(select(Collection.id).where(Collection.firm_id == firm_id, Collection.deleted_at.is_(None)))
+async def firm_document_statuses(db: AsyncSession, firm_id: str) -> dict[str, int]:
+    collection_ids = await db.scalars(select(Collection.id).where(Collection.firm_id == firm_id, Collection.deleted_at.is_(None)))
     ids = [thread_id(cid) for cid in collection_ids]
     if not ids:
         return {}
-    rows = db.scalars(select(UnstructuredData).where(UnstructuredData.thread_id.in_(ids)))
+    rows = await db.scalars(select(UnstructuredData).where(UnstructuredData.thread_id.in_(ids)))
     return dict(Counter(document_status(row) for row in rows))
 
 
-def load_document(db: Session, document_id: str) -> UnstructuredData | None:
+async def load_document(db: AsyncSession, document_id: str) -> UnstructuredData | None:
     doc_id = as_uuid(document_id)
-    return db.get(UnstructuredData, doc_id) if doc_id else None
+    return await db.get(UnstructuredData, doc_id) if doc_id else None
 
 
 # Folder operations (async, through the RAG services) ----------------------------------------------

@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 import httpx
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from pymicroservices.app.utilities.secrets_control import get_settings
 from pymicroservices.app.utilities.errors import ApiError, bad_request
@@ -58,18 +58,18 @@ class IdentityProvider:
     console: str
     hosted = False  # True: sign-in happens on the provider's page (redirect + callback)
 
-    async def authenticate(self, db: Session, email: str, password: str, require_mfa: bool) -> AuthStep: ...
-    async def complete_new_password(self, db: Session, email: str, state: dict, new_password: str, require_mfa: bool) -> AuthStep: ...
-    async def verify_mfa(self, db: Session, email: str, state: dict, code: str) -> AuthStep: ...
-    async def begin_mfa_setup(self, db: Session, email: str, state: dict) -> AuthStep: ...
-    async def finish_mfa_setup(self, db: Session, email: str, state: dict, code: str) -> AuthStep: ...
-    async def forgot_password(self, db: Session, email: str) -> str | None: ...
-    async def reset_password(self, db: Session, email: str, code: str, new_password: str) -> None: ...
-    async def reverify(self, db: Session, email: str, refresh_token: str | None) -> tuple[bool, str | None]: ...
-    async def create_user(self, db: Session, email: str, name: str) -> tuple[str, str | None]: ...
-    async def set_enabled(self, db: Session, email: str, enabled: bool) -> None: ...
-    async def delete_user(self, db: Session, email: str, subject: str | None = None) -> None: ...
-    async def global_sign_out(self, db: Session, email: str) -> None: ...
+    async def authenticate(self, db: AsyncSession, email: str, password: str, require_mfa: bool) -> AuthStep: ...
+    async def complete_new_password(self, db: AsyncSession, email: str, state: dict, new_password: str, require_mfa: bool) -> AuthStep: ...
+    async def verify_mfa(self, db: AsyncSession, email: str, state: dict, code: str) -> AuthStep: ...
+    async def begin_mfa_setup(self, db: AsyncSession, email: str, state: dict) -> AuthStep: ...
+    async def finish_mfa_setup(self, db: AsyncSession, email: str, state: dict, code: str) -> AuthStep: ...
+    async def forgot_password(self, db: AsyncSession, email: str) -> str | None: ...
+    async def reset_password(self, db: AsyncSession, email: str, code: str, new_password: str) -> None: ...
+    async def reverify(self, db: AsyncSession, email: str, refresh_token: str | None) -> tuple[bool, str | None]: ...
+    async def create_user(self, db: AsyncSession, email: str, name: str) -> tuple[str, str | None]: ...
+    async def set_enabled(self, db: AsyncSession, email: str, enabled: bool) -> None: ...
+    async def delete_user(self, db: AsyncSession, email: str, subject: str | None = None) -> None: ...
+    async def global_sign_out(self, db: AsyncSession, email: str) -> None: ...
 
 
 PASSWORD_RULES = "at least 12 characters, with upper and lower case letters and a number"
@@ -89,9 +89,9 @@ class DevProvider(IdentityProvider):
     def __init__(self, console: str):
         self.console = console
 
-    def _get(self, db: Session, email: str):
+    async def _get(self, db: AsyncSession, email: str):
         from pymicroservices.app.firm_models import DevIdentity
-        return db.scalar(select(DevIdentity).where(DevIdentity.console == self.console, DevIdentity.email == email))
+        return await db.scalar(select(DevIdentity).where(DevIdentity.console == self.console, DevIdentity.email == email))
 
     def _after_password(self, ident, require_mfa: bool) -> AuthStep:
         if ident.mfa_enabled:
@@ -101,7 +101,7 @@ class DevProvider(IdentityProvider):
         return AuthStep("ok", subject=ident.id, refresh_token=crypto.random_token())
 
     async def authenticate(self, db, email, password, require_mfa, organization_id=None, invitation_token=None):
-        ident = self._get(db, email)
+        ident = await self._get(db, email)
         if not ident or not crypto.verify_password(password, ident.password_hash):
             return AuthStep("invalid")
         if ident.disabled:
@@ -112,48 +112,48 @@ class DevProvider(IdentityProvider):
 
     async def complete_new_password(self, db, email, state, new_password, require_mfa):
         check_password_policy(new_password)
-        ident = self._get(db, email)
+        ident = await self._get(db, email)
         if not ident or ident.disabled:
             return AuthStep("invalid")
         ident.password_hash = crypto.hash_password(new_password)
         ident.must_change_password = False
-        db.commit()
+        await db.commit()
         return self._after_password(ident, require_mfa)
 
     async def verify_mfa(self, db, email, state, code):
-        ident = self._get(db, email)
+        ident = await self._get(db, email)
         if not ident or not ident.mfa_secret or not crypto.verify_totp(ident.mfa_secret, code):
             return AuthStep("invalid")
         return AuthStep("ok", subject=ident.id, refresh_token=crypto.random_token())
 
     async def begin_mfa_setup(self, db, email, state):
-        ident = self._get(db, email)
+        ident = await self._get(db, email)
         secret = crypto.new_totp_secret()
         return AuthStep("mfa_setup_required", subject=ident.id, mfa_secret=secret, state={"secret": secret})
 
     async def finish_mfa_setup(self, db, email, state, code):
-        ident = self._get(db, email)
+        ident = await self._get(db, email)
         secret = state.get("secret")
         if not ident or not secret or not crypto.verify_totp(secret, code):
             return AuthStep("invalid")
         ident.mfa_secret, ident.mfa_enabled = secret, True
-        db.commit()
+        await db.commit()
         return AuthStep("ok", subject=ident.id, refresh_token=crypto.random_token())
 
     async def forgot_password(self, db, email):
-        ident = self._get(db, email)
+        ident = await self._get(db, email)
         if not ident:
             return None
         code = f"{secrets.randbelow(1_000_000):06d}"
         ident.reset_code_hash = crypto.hash_password(code)
         ident.reset_expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
-        db.commit()
+        await db.commit()
         log.warning("[dev] password reset code for %s (%s console): %s", email, self.console, code)
         return code
 
     async def reset_password(self, db, email, code, new_password):
         check_password_policy(new_password)
-        ident = self._get(db, email)
+        ident = await self._get(db, email)
         expires = ident.reset_expires_at if ident else None
         if expires and expires.tzinfo is None:
             expires = expires.replace(tzinfo=timezone.utc)
@@ -163,32 +163,32 @@ class DevProvider(IdentityProvider):
         ident.password_hash = crypto.hash_password(new_password)
         ident.must_change_password = False
         ident.reset_code_hash = None
-        db.commit()
+        await db.commit()
 
     async def reverify(self, db, email, refresh_token):
-        ident = self._get(db, email)
+        ident = await self._get(db, email)
         return bool(ident and not ident.disabled), refresh_token
 
     async def create_user(self, db, email, name, organization_id=None):
         from pymicroservices.app.firm_models import DevIdentity
-        if self._get(db, email):
+        if await self._get(db, email):
             raise ApiError(409, "EMAIL_EXISTS", "An account with this email already exists.")
         temp = "Temp-" + secrets.token_urlsafe(9) + "9a"
         ident = DevIdentity(console=self.console, email=email, password_hash=crypto.hash_password(temp))
         db.add(ident)
-        db.flush()
+        await db.flush()
         log.warning("[dev] temporary password for %s (%s console): %s", email, self.console, temp)
         return ident.id, temp
 
     async def set_enabled(self, db, email, enabled):
-        ident = self._get(db, email)
+        ident = await self._get(db, email)
         if ident:
             ident.disabled = not enabled
 
     async def delete_user(self, db, email, subject=None):
-        ident = self._get(db, email)
+        ident = await self._get(db, email)
         if ident:
-            db.delete(ident)
+            await db.delete(ident)
 
     async def global_sign_out(self, db, email):
         return None

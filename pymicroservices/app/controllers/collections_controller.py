@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from pymicroservices.app.utilities.firm_db import get_db
 from pymicroservices.app.utilities.errors import bad_request, not_found
@@ -43,25 +43,25 @@ class GrantsIn(BaseModel):
     grants: list[Grant] = Field(max_length=200)
 
 
-def _collection_out(db: Session, ctx: Ctx, col: Collection, perms: set[str], visible_ids: set[str] | None) -> dict:
+async def _collection_out(db: AsyncSession, ctx: Ctx, col: Collection, perms: set[str], visible_ids: set[str] | None) -> dict:
     return {"id": col.id, "name": col.name, "description": col.description, "created_at": iso(col.created_at),
-            "documents": files.collection_counts(db, [col.id]).get(col.id, 0),
-            "matters": collection_matters(db, [col.id], visible_ids).get(col.id, []),
+            "documents": (await files.collection_counts(db, [col.id])).get(col.id, 0),
+            "matters": (await collection_matters(db, [col.id], visible_ids)).get(col.id, []),
             "flags": access.collection_flags(perms)}
 
 
 @router.get("/collections")
-def list_collections(q: str = "", db: Session = Depends(get_db), ctx: Ctx = Depends(require("collections.list"))):
+async def list_collections(q: str = "", db: AsyncSession = Depends(get_db), ctx: Ctx = Depends(require("collections.list"))):
     stmt = access.visible_collections(ctx.who)
     if q:
         stmt = stmt.where(Collection.name.ilike(f"%{q}%"))
-    cols = db.scalars(stmt.order_by(Collection.created_at.desc()).limit(500)).all()
-    visible_ids = None if ctx.who.is_admin else set(db.scalars(access.visible_matter_ids(ctx.who)))
-    counts = files.collection_counts(db, [c.id for c in cols])
-    links = collection_matters(db, [c.id for c in cols], visible_ids)
+    cols = (await db.scalars(stmt.order_by(Collection.created_at.desc()).limit(500))).all()
+    visible_ids = None if ctx.who.is_admin else set(await db.scalars(access.visible_matter_ids(ctx.who)))
+    counts = await files.collection_counts(db, [c.id for c in cols])
+    links = await collection_matters(db, [c.id for c in cols], visible_ids)
     items = []
     for c in cols:
-        perms, _ = access.collection_perms(db, ctx.who, c)
+        perms, _ = await access.collection_perms(db, ctx.who, c)
         items.append({"id": c.id, "name": c.name, "description": c.description, "created_at": iso(c.created_at),
                       "documents": counts.get(c.id, 0), "matters": links.get(c.id, []),
                       "flags": access.collection_flags(perms)})
@@ -69,65 +69,65 @@ def list_collections(q: str = "", db: Session = Depends(get_db), ctx: Ctx = Depe
 
 
 @router.post("/collections", status_code=201)
-def create_collection(body: CollectionIn, db: Session = Depends(get_db),
+async def create_collection(body: CollectionIn, db: AsyncSession = Depends(get_db),
                       ctx: Ctx = Depends(require("collections.create_unlinked"))):
     col = Collection(firm_id=ctx.who.firm_id, name=body.name.strip(), description=body.description.strip(),
                      created_by=None if ctx.who.is_admin else ctx.who.id,
                      created_by_admin=ctx.who.id if ctx.who.is_admin else None)
     db.add(col)
-    db.flush()
+    await db.flush()
     audit.record_ctx(db, ctx, "collection.created", "collection", col.id, name=col.name)
-    db.commit()
-    perms, _ = access.collection_perms(db, ctx.who, col)
-    return {"collection": _collection_out(db, ctx, col, perms, None)}
+    await db.commit()
+    perms, _ = await access.collection_perms(db, ctx.who, col)
+    return {"collection": await _collection_out(db, ctx, col, perms, None)}
 
 
 @router.get("/collections/{collection_id}")
-def get_collection(collection_id: str, db: Session = Depends(get_db),
+async def get_collection(collection_id: str, db: AsyncSession = Depends(get_db),
                    ctx: Ctx = Depends(require("collections.read", collection="collection_id"))):
-    visible_ids = None if ctx.who.is_admin else set(db.scalars(access.visible_matter_ids(ctx.who)))
+    visible_ids = None if ctx.who.is_admin else set(await db.scalars(access.visible_matter_ids(ctx.who)))
     grants = []
     if "collections.share" in ctx.perms:
-        rows = db.execute(select(CollectionGrant, IamUser).join(IamUser, IamUser.id == CollectionGrant.user_id)
-                          .where(CollectionGrant.collection_id == collection_id)).all()
+        rows = (await db.execute(select(CollectionGrant, IamUser).join(IamUser, IamUser.id == CollectionGrant.user_id)
+                                 .where(CollectionGrant.collection_id == collection_id))).all()
         grants = [{"user_id": u.id, "name": u.name, "email": u.email, "level": g.level} for g, u in rows]
-    return {"collection": dict(_collection_out(db, ctx, ctx.collection, ctx.perms, visible_ids), grants=grants,
+    return {"collection": dict(await _collection_out(db, ctx, ctx.collection, ctx.perms, visible_ids), grants=grants,
                                can_share="collections.share" in ctx.perms)}
 
 
 @router.patch("/collections/{collection_id}")
-def update_collection(collection_id: str, body: CollectionPatch, db: Session = Depends(get_db),
+async def update_collection(collection_id: str, body: CollectionPatch, db: AsyncSession = Depends(get_db),
                       ctx: Ctx = Depends(require("collections.update", collection="collection_id"))):
     changes = body.model_dump(exclude_none=True)
     for key, value in changes.items():
         setattr(ctx.collection, key, value.strip())
     audit.record_ctx(db, ctx, "collection.updated", "collection", collection_id, **changes)
-    db.commit()
-    return {"collection": _collection_out(db, ctx, ctx.collection, ctx.perms, None)}
+    await db.commit()
+    return {"collection": await _collection_out(db, ctx, ctx.collection, ctx.perms, None)}
 
 
 @router.delete("/collections/{collection_id}")
-def delete_collection(collection_id: str, db: Session = Depends(get_db),
+async def delete_collection(collection_id: str, db: AsyncSession = Depends(get_db),
                       ctx: Ctx = Depends(require("collections.delete", collection="collection_id"))):
     ctx.collection.deleted_at = _now()
     audit.record_ctx(db, ctx, "collection.deleted", "collection", collection_id)
-    db.commit()
+    await db.commit()
     return {"status": "success"}
 
 
 @router.put("/collections/{collection_id}/grants")
-def set_grants(collection_id: str, body: GrantsIn, db: Session = Depends(get_db),
+async def set_grants(collection_id: str, body: GrantsIn, db: AsyncSession = Depends(get_db),
                ctx: Ctx = Depends(require("collections.share", collection="collection_id"))):
     ids = {g.user_id for g in body.grants}
-    valid = set(db.scalars(select(IamUser.id).where(IamUser.firm_id == ctx.who.firm_id, IamUser.id.in_(ids))))
+    valid = set(await db.scalars(select(IamUser.id).where(IamUser.firm_id == ctx.who.firm_id, IamUser.id.in_(ids))))
     if ids - valid:
         raise bad_request("UNKNOWN_USER", "One of those people isn't in your firm.")
-    db.execute(delete(CollectionGrant).where(CollectionGrant.collection_id == collection_id))
+    await db.execute(delete(CollectionGrant).where(CollectionGrant.collection_id == collection_id))
     for g in body.grants:
         db.add(CollectionGrant(collection_id=collection_id, user_id=g.user_id, level=g.level, granted_by=ctx.who.id))
     audit.record_ctx(db, ctx, "collection.grants_changed", "collection", collection_id,
                      grants=[g.model_dump() for g in body.grants])
-    db.commit()
+    await db.commit()
     return {"status": "success"}
 
 
@@ -141,14 +141,14 @@ class UploadIn(BaseModel):
 
 
 @router.get("/collections/{collection_id}/documents")
-def list_documents(collection_id: str, db: Session = Depends(get_db),
+async def list_documents(collection_id: str, db: AsyncSession = Depends(get_db),
                    ctx: Ctx = Depends(require("documents.read", collection="collection_id"))):
-    docs = files.list_documents(db, collection_id)
+    docs = await files.list_documents(db, collection_id)
     return {"items": [files.document_out(d) for d in docs], "flags": access.collection_flags(ctx.perms)}
 
 
 @router.post("/collections/{collection_id}/uploads", status_code=201)
-async def start_upload(collection_id: str, body: UploadIn, request: Request, db: Session = Depends(get_db),
+async def start_upload(collection_id: str, body: UploadIn, request: Request, db: AsyncSession = Depends(get_db),
                        ctx: Ctx = Depends(require("documents.upload", collection="collection_id"))):
     doc, upload = await files.start_upload(request.app.state.threads, ctx.collection, ctx.who.id,
                                            body.filename.strip(), body.size_bytes, body.sha256.lower())
@@ -156,13 +156,13 @@ async def start_upload(collection_id: str, body: UploadIn, request: Request, db:
 
 
 @router.get("/documents/{document_id}")
-def get_document(document_id: str, db: Session = Depends(get_db),
+async def get_document(document_id: str, db: AsyncSession = Depends(get_db),
                  ctx: Ctx = Depends(require("documents.read", document="document_id"))):
     return {"document": files.document_out(ctx.document)}
 
 
 @router.post("/documents/{document_id}/complete")
-async def complete_upload(document_id: str, request: Request, db: Session = Depends(get_db),
+async def complete_upload(document_id: str, request: Request, db: AsyncSession = Depends(get_db),
                           ctx: Ctx = Depends(require("documents.upload", document="document_id"))):
     doc = ctx.document
     if doc.upload_status != "RUNNING":
@@ -172,43 +172,43 @@ async def complete_upload(document_id: str, request: Request, db: Session = Depe
         raise bad_request("UPLOAD_REJECTED", doc.upload_error or "The uploaded file was rejected. Try uploading again.")
     audit.record_ctx(db, ctx, "document.uploaded", "document", str(doc.id), filename=doc.file_name,
                      size=doc.byte_count, collection_id=str(doc.thread_id))
-    db.commit()
+    await db.commit()
     return {"document": files.document_out(doc)}
 
 
 @router.post("/documents/{document_id}/retry")
-async def retry_document(document_id: str, request: Request, db: Session = Depends(get_db),
+async def retry_document(document_id: str, request: Request, db: AsyncSession = Depends(get_db),
                          ctx: Ctx = Depends(require("documents.upload", document="document_id"))):
     # The retrigger service decides: failed stages, stalled workers and stuck queues can run again.
     doc = await files.retry(request.app.state.retrigger, ctx.who.id, ctx.document)
     audit.record_ctx(db, ctx, "document.retried", "document", str(doc.id))
-    db.commit()
+    await db.commit()
     return {"document": files.document_out(doc)}
 
 
 @router.get("/documents/{document_id}/download")
-def download_document(document_id: str, request: Request, db: Session = Depends(get_db),
+async def download_document(document_id: str, request: Request, db: AsyncSession = Depends(get_db),
                       ctx: Ctx = Depends(require("documents.download", document="document_id"))):
     doc = ctx.document
     if doc.upload_status != "COMPLETED":
         raise not_found("Document")
     action = "admin.document_access" if ctx.who.is_admin else "document.downloaded"
     audit.record_ctx(db, ctx, action, "document", str(doc.id), filename=doc.file_name)
-    db.commit()
+    await db.commit()
     state = request.app.state
     return {"url": state.storage.presign_get(doc.s3_path, doc.file_name, state.settings.download_url_ttl_seconds)}
 
 
 @router.delete("/documents/{document_id}")
-async def delete_document(document_id: str, request: Request, db: Session = Depends(get_db),
+async def delete_document(document_id: str, request: Request, db: AsyncSession = Depends(get_db),
                           ctx: Ctx = Depends(require("documents.delete", document="document_id"))):
     await files.delete_document(request.app.state.threads, ctx.document)
     audit.record_ctx(db, ctx, "document.deleted", "document", document_id, filename=ctx.document.file_name)
-    db.commit()
+    await db.commit()
     return {"status": "success"}
 
 
 @router.post("/collections/{collection_id}/search")
-async def search_collection(collection_id: str, body: SearchIn, request: Request, db: Session = Depends(get_db),
+async def search_collection(collection_id: str, body: SearchIn, request: Request, db: AsyncSession = Depends(get_db),
                             ctx: Ctx = Depends(require("documents.read", collection="collection_id"))):
     return await search(request.app.state, [collection_id], collection_id, body)

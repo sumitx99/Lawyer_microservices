@@ -10,29 +10,37 @@ import asyncio
 
 from sqlalchemy import select
 
-from pymicroservices.app.utilities.firm_db import SessionLocal
 from pymicroservices.app.firm_models import Admin, Firm
 from pymicroservices.app.security.permissions import sync_permission_sets
 from pymicroservices.app.security.providers import WorkOSProvider, get_provider
+from pymicroservices.app.utilities.postgresql_helper import Database
 
 
 async def main(args) -> None:
-    with SessionLocal() as db:
-        sync_permission_sets(db)
-        if db.scalar(select(Firm).where(Firm.slug == args.slug)):
+    database = Database()
+    try:
+        await create(database, args)
+    finally:
+        await database.close()
+
+
+async def create(database: Database, args) -> None:
+    async with database.sessions(autoflush=False) as db:
+        await sync_permission_sets(db)
+        if await db.scalar(select(Firm).where(Firm.slug == args.slug)):
             raise SystemExit(f"Firm slug '{args.slug}' already exists")
         email = args.email.lower()
-        if db.scalar(select(Admin).where(Admin.email == email)):
+        if await db.scalar(select(Admin).where(Admin.email == email)):
             raise SystemExit(f"{email} is already an admin")
         provider = get_provider("admin")
         firm = Firm(name=args.firm, slug=args.slug, require_mfa=not args.no_mfa)
         if isinstance(provider, WorkOSProvider):
             firm.workos_organization_id = await provider.create_organization(args.firm)
         db.add(firm)
-        db.flush()
+        await db.flush()
         subject, temp = await provider.create_user(db, email, args.name, organization_id=firm.workos_organization_id)
         db.add(Admin(firm_id=firm.id, email=email, name=args.name, provider_subject=subject, status="invited"))
-        db.commit()
+        await db.commit()
         print(f"Created firm {firm.name} ({firm.id}) with admin {email}")
         if firm.workos_organization_id:
             print(f"WorkOS organization {firm.workos_organization_id}; invitation emailed to {email}")

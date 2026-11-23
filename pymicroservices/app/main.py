@@ -37,7 +37,6 @@ from .services.retrigger.retrigger_service import RetriggerService
 from .services.threads.unstructured.thread_service import ThreadService
 from .utilities.errors import install_handlers
 from .utilities.file_validator import UploadError
-from .utilities.firm_db import SessionLocal
 from .utilities.postgresql_helper import Database
 from .utilities.secrets_control import get_settings
 from .utilities.storage_helper import Storage
@@ -108,10 +107,10 @@ def create_app(settings=None):
 
     @asynccontextmanager
     async def lifespan(app):
-        # Fatal on failure: with no permission rows every check would deny everyone.
-        with SessionLocal() as session:
-            sync_permission_sets(session)
         db, storage, cache = Database(settings), Storage(settings), Cache(settings)
+        # Fatal on failure: with no permission rows every check would deny everyone.
+        async with db.transaction() as session:
+            await sync_permission_sets(session)
         app.state.settings = settings
         app.state.db, app.state.storage, app.state.cache = db, storage, cache
         app.state.projects = ProjectService(db)

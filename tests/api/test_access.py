@@ -3,10 +3,12 @@
   Ava    ATTORNEY, Lead on Morgan        Carlos CASE_MANAGER, Lead on Reyes, in PI Team A
   Priya  PARALEGAL, in PI Team A (Editor on Morgan via the team)
   Ben    PARALEGAL, walled off Morgan, Viewer on Reyes"""
+from sqlalchemy import select
+
 from pymicroservices.app.firm_models import Firm, IamUser, Matter, MatterMember
 from pymicroservices.app.security import access
 from pymicroservices.app.security.access import Principal
-from tests.api.conftest import SessionLocal, as_admin, as_user, matter_id, user_id
+from tests.api.conftest import as_admin, as_user, in_db, matter_id, user_id
 
 
 def names(api) -> set[str]:
@@ -59,17 +61,19 @@ def test_viewer_and_firm_viewer_are_read_only():
 
 def test_attorney_only_permission_needs_licensed_firm_role():
     """A Paralegal made Lead still can't approve drafts; an Attorney Lead can."""
-    with SessionLocal() as db:
-        morgan = matter_id("Morgan v. Westfield")
-        priya = db.query(IamUser).filter_by(email="priya@morganlaw.test").one()
+    morgan = matter_id("Morgan v. Westfield")
+
+    async def check(db):
+        priya = await db.scalar(select(IamUser).where(IamUser.email == "priya@morganlaw.test"))
         db.add(MatterMember(matter_id=morgan, principal_type="user", principal_id=priya.id, role="LEAD"))
-        db.commit()
+        await db.flush()
         p = Principal("iam", priya.id, priya.firm_id, priya.email, priya.name, priya.firm_role)
-        perms, role, _ = access.matter_perms(db, p, morgan)
+        perms, role, _ = await access.matter_perms(db, p, morgan)
         assert role == "LEAD" and "members.manage" in perms and "drafts.approve" not in perms
-        ava = db.query(IamUser).filter_by(email="ava@morganlaw.test").one()
+        ava = await db.scalar(select(IamUser).where(IamUser.email == "ava@morganlaw.test"))
         a = Principal("iam", ava.id, ava.firm_id, ava.email, ava.name, ava.firm_role)
-        assert "drafts.approve" in access.matter_perms(db, a, morgan)[0]
+        assert "drafts.approve" in (await access.matter_perms(db, a, morgan))[0]
+    in_db(check)
 
 
 def test_editor_can_only_grant_viewer():
@@ -126,13 +130,13 @@ def test_admin_ignores_walls():
 
 
 def test_firms_are_isolated():
-    with SessionLocal() as db:
+    async def other_firm(db):
         other = Firm(name="Other Firm", slug="other")
         db.add(other)
-        db.flush()
+        await db.flush()
         db.add(Matter(firm_id=other.id, number="M-0001", name="Secret v. Other", client_name="Z"))
-        db.commit()
-        secret = db.query(Matter).filter_by(name="Secret v. Other").one().id
+    in_db(other_firm)
+    secret = matter_id("Secret v. Other")
     for api in (as_admin(), as_user("maya@morganlaw.test")):
         assert "Secret v. Other" not in names(api)
         assert api.get(f"/api/matters/{secret}").status_code == 404

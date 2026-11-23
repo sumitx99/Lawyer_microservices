@@ -9,8 +9,8 @@ Layers
   matter role (matter_members.role)      -> what they may do on one matter
   ATTORNEY_ONLY permissions also need a licensed firm role, whatever the matter role.
 """
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Building blocks -------------------------------------------------------------
 PLATFORM = ["profile.read", "profile.update", "users.picker", "teams.read"]
@@ -84,11 +84,11 @@ def is_licensed(firm_role: str) -> bool:
     return bool(FIRM_ROLES.get(firm_role, {}).get("licensed"))
 
 
-def sync_permission_sets(db: Session) -> None:
-    """Upsert one row per built-in role. Raises on failure; main.py refuses to start."""
+async def sync_permission_sets(db: AsyncSession) -> None:
+    """Upsert one row per built-in role inside the caller's transaction. Raises on failure; main.py refuses to start."""
     from pymicroservices.app.firm_models import PermissionSet
 
-    existing = {row.for_role: row for row in db.scalars(select(PermissionSet))}
+    existing = {row.for_role: row for row in (await db.scalars(select(PermissionSet))).all()}
     rows = [(key, "firm", spec) for key, spec in FIRM_ROLES.items()] + \
            [(key, "matter", spec) for key, spec in MATTER_ROLES.items()]
     for key, layer, spec in rows:
@@ -100,7 +100,7 @@ def sync_permission_sets(db: Session) -> None:
         row.licensed = bool(spec.get("licensed"))
         row.is_system = True
         db.add(row)
-    db.commit()
-    count = db.query(PermissionSet).count()
+    await db.flush()
+    count = await db.scalar(select(func.count()).select_from(PermissionSet))
     if count < len(rows):
         raise RuntimeError("permission_sets sync incomplete; refusing to start")
