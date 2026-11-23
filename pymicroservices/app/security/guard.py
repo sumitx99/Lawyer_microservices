@@ -14,7 +14,7 @@ import hmac
 from dataclasses import dataclass
 
 from fastapi import Depends, Request
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from pymicroservices.app.utilities.firm_db import get_db
 from pymicroservices.app.utilities.errors import ApiError, forbidden, not_found, unauthorized
@@ -49,20 +49,20 @@ def _check_csrf(request: Request) -> None:
             raise ApiError(403, "CSRF_FAILED", "Your session needs a refresh. Reload the page and try again.")
 
 
-async def resolve(request: Request, db: Session, console: str | None = None) -> Ctx:
+async def resolve(request: Request, db: AsyncSession, console: str | None = None) -> Ctx:
     console = console or ("admin" if request.headers.get("x-console") == "admin" else "iam")
-    row = load_session(db, request, console)
+    row = await load_session(db, request, console)
     if not row:
         raise unauthorized()
     if console == "admin":
-        person = db.get(Admin, row.principal_id)
+        person = await db.get(Admin, row.principal_id)
         firm_role = None
     else:
-        person = db.get(IamUser, row.principal_id)
+        person = await db.get(IamUser, row.principal_id)
         firm_role = person.firm_role if person else None
     if not person or person.status != "active" or person.firm_id != row.firm_id:
         revoke(db, row)
-        db.commit()
+        await db.commit()
         raise unauthorized()
     if needs_reverify(row):
         refresh = crypto.decrypt(row.refresh_token_enc) if row.refresh_token_enc else None
@@ -71,11 +71,11 @@ async def resolve(request: Request, db: Session, console: str | None = None) -> 
             row.refresh_token_enc = crypto.encrypt(new_refresh)  # WorkOS rotates refresh tokens
         if not ok:
             revoke(db, row)
-            db.commit()
+            await db.commit()
             raise unauthorized("Your account was signed out. Please sign in again.")
         from datetime import datetime, timezone
         row.last_verified_at = datetime.now(timezone.utc)
-        db.commit()
+        await db.commit()
     _check_csrf(request)
     who = Principal(console=console, id=person.id, firm_id=person.firm_id, email=person.email,
                     name=person.name, firm_role=firm_role)
@@ -94,7 +94,7 @@ def public(reason: str):
 
 
 def require_admin():
-    async def dep(request: Request, db: Session = Depends(get_db)) -> Ctx:
+    async def dep(request: Request, db: AsyncSession = Depends(get_db)) -> Ctx:
         if request.headers.get("x-console") != "admin":
             raise forbidden("Use the Admin console for this.")
         return await resolve(request, db, "admin")
@@ -103,7 +103,7 @@ def require_admin():
 
 def require_session():
     """Signed in to either console; no permission needed (e.g. /me, logout)."""
-    async def dep(request: Request, db: Session = Depends(get_db)) -> Ctx:
+    async def dep(request: Request, db: AsyncSession = Depends(get_db)) -> Ctx:
         return await resolve(request, db)
     return _mark(dep, "session")
 
@@ -111,20 +111,20 @@ def require_session():
 def require(perm: str, *, matter: str | None = None, collection: str | None = None, document: str | None = None):
     """Route gate + object check in one. `matter`/`collection`/`document` name the path
     parameter that identifies the object; the check is then scoped to that object."""
-    async def dep(request: Request, db: Session = Depends(get_db)) -> Ctx:
+    async def dep(request: Request, db: AsyncSession = Depends(get_db)) -> Ctx:
         ctx = await resolve(request, db)
         params = request.path_params
         if matter:
-            ctx.matter, ctx.perms, ctx.matter_role = access.authorize_matter(db, ctx.who, perm, params[matter])
+            ctx.matter, ctx.perms, ctx.matter_role = await access.authorize_matter(db, ctx.who, perm, params[matter])
         elif collection:
-            ctx.collection, ctx.perms = access.authorize_collection(db, ctx.who, perm, params[collection])
+            ctx.collection, ctx.perms = await access.authorize_collection(db, ctx.who, perm, params[collection])
         elif document:
-            doc = load_document(db, params[document])
+            doc = await load_document(db, params[document])
             if not doc:
                 raise not_found("Document")
             # Bind document -> its collection (the folder has the collection's id), then check the
             # collection, which also checks the firm (no id pairing tricks).
-            ctx.collection, ctx.perms = access.authorize_collection(db, ctx.who, perm, str(doc.thread_id))
+            ctx.collection, ctx.perms = await access.authorize_collection(db, ctx.who, perm, str(doc.thread_id))
             ctx.document = doc
         else:
             if perm in access.MATTER_SCOPED:

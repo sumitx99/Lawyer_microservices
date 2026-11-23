@@ -54,6 +54,13 @@ def test_plain_query_and_duplicate_references():
     assert references('Section 1380')[0]['numbers'] == ('1380',)
 
 
+def test_reference_clause_path_patterns():
+    assert references('Clause 5.2')[0]['path'] == ['"((clause|खंड)[[:space:]]*)?5\\.2"']
+    assert references('Article 21')[0]['path'] == ['"((article|अनुच्छेद)[[:space:]]*)21"']
+    assert len(references('Order 7 Rule 11')[0]['path']) == 2 and references('1234 of 2025')[0]['path'] == []
+    assert references('Section 138')[0]['pattern'].endswith('138(?![[:alnum:]_]|[.][0-9])')
+
+
 def test_diversity_preserves_order_and_can_return_fewer_than_top_k():
     doc = uuid4()
     items = [item(doc) for _ in range(4)] + [item()]
@@ -160,3 +167,41 @@ async def test_reranker_missing_dependencies_is_local_only(monkeypatch):
     monkeypatch.setitem(sys.modules, 'transformers', None)
     with pytest.raises(ModelUnavailable):
         await Reranker(settings()).score_async('rent', ['a passage'])
+
+
+@pytest.mark.parametrize('enabled,missing', [(False, False), (True, True)])
+async def test_search_skips_disabled_or_missing_reranker(enabled, missing):
+    from contextlib import asynccontextmanager
+    from pymicroservices.app.services.retrieval.retrieval_service import RetrievalService
+    @asynccontextmanager
+    async def transaction():
+        yield None
+    service = RetrievalService(SimpleNamespace(transaction=transaction), settings(reranker_enabled=enabled))
+    service.authorize = AsyncMock()
+    candidate = item()
+    service.candidate_lists = AsyncMock(return_value={'vector': [candidate], 'keyword': [], 'reference': []})
+    ranker = SimpleNamespace(score_async=AsyncMock(side_effect=ModelUnavailable()))
+    embedder = SimpleNamespace(embed_async=AsyncMock(return_value=[[1.] + [0.] * 1023]))
+    response = await service.search('user', RetrievalSearchRequest(project_id=uuid4(), query='rent'), embedder, ranker)
+    assert response.results[0].id == candidate.id and not response.reranked and response.timing_ms.rerank == 0
+    assert response.results[0].scores.rerank is None
+    assert ranker.score_async.await_count == int(enabled)
+
+
+@pytest.mark.parametrize('device,dtype', [('mps', 'float16'), ('cuda', 'float16'), ('cpu', 'float32')])
+def test_reranker_uses_fp16_on_gpu_and_fp32_on_cpu(monkeypatch, device, dtype):
+    import sys
+    placed = {}
+
+    class Model:
+        def to(self, device, dtype):
+            placed.update(device=device, dtype=dtype)
+            return self
+        def eval(self): return self
+
+    loader = SimpleNamespace(from_pretrained=lambda *args, **kwargs: Model())
+    monkeypatch.setitem(sys.modules, 'torch', SimpleNamespace(float16='float16', float32='float32'))
+    monkeypatch.setitem(sys.modules, 'transformers', SimpleNamespace(AutoTokenizer=loader,
+                                                                     AutoModelForSequenceClassification=loader))
+    Reranker(settings(embedding_device=device))._load()
+    assert placed == {'device': device, 'dtype': dtype}

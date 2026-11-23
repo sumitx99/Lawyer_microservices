@@ -11,7 +11,7 @@ never appear in a list and then refuse to open."""
 from dataclasses import dataclass
 
 from sqlalchemy import and_, exists, literal, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from pymicroservices.app.utilities.errors import forbidden, not_found
 from pymicroservices.app.firm_models import (Collection, CollectionGrant, Matter, MatterCollection, MatterMember, TeamMember)
@@ -37,25 +37,25 @@ class Principal:
 
 
 # Matter roles ---------------------------------------------------------------------
-def matter_role(db: Session, who: Principal, matter_id: str) -> str | None:
+async def matter_role(db: AsyncSession, who: Principal, matter_id: str) -> str | None:
     """Best role for an IAM user on a matter: BLOCKED (wall) beats everything,
     otherwise the highest of direct and team roles."""
     team_ids = select(TeamMember.team_id).where(TeamMember.user_id == who.id)
-    rows = db.scalars(select(MatterMember.role).where(
+    rows = (await db.scalars(select(MatterMember.role).where(
         MatterMember.matter_id == matter_id,
         or_(and_(MatterMember.principal_type == "user", MatterMember.principal_id == who.id),
-            and_(MatterMember.principal_type == "team", MatterMember.principal_id.in_(team_ids))))).all()
+            and_(MatterMember.principal_type == "team", MatterMember.principal_id.in_(team_ids)))))).all()
     if P.BLOCKED in rows:
         return P.BLOCKED
     ranked = [r for r in rows if r in P.MATTER_RANK]
     return max(ranked, key=P.MATTER_RANK.get) if ranked else None
 
 
-def matter_perms(db: Session, who: Principal, matter_id: str) -> tuple[set[str], str | None, bool]:
+async def matter_perms(db: AsyncSession, who: Principal, matter_id: str) -> tuple[set[str], str | None, bool]:
     """(permissions on this matter, matter role, visible?)"""
     if who.is_admin:
         return set(P.ALL_PERMISSIONS), "ADMIN", True
-    role = matter_role(db, who, matter_id)
+    role = await matter_role(db, who, matter_id)
     if role == P.BLOCKED:
         return set(), role, False
     perms: set[str] = set()
@@ -68,16 +68,16 @@ def matter_perms(db: Session, who: Principal, matter_id: str) -> tuple[set[str],
     return perms, role, (role is not None or ceiling)
 
 
-def load_matter(db: Session, who: Principal, matter_id: str) -> Matter:
-    matter = db.get(Matter, matter_id)
+async def load_matter(db: AsyncSession, who: Principal, matter_id: str) -> Matter:
+    matter = await db.get(Matter, matter_id)
     if not matter or matter.firm_id != who.firm_id or matter.deleted_at is not None:
         raise not_found("Matter")
     return matter
 
 
-def authorize_matter(db: Session, who: Principal, perm: str, matter_id: str) -> tuple[Matter, set[str], str | None]:
-    matter = load_matter(db, who, matter_id)
-    perms, role, visible = matter_perms(db, who, matter_id)
+async def authorize_matter(db: AsyncSession, who: Principal, perm: str, matter_id: str) -> tuple[Matter, set[str], str | None]:
+    matter = await load_matter(db, who, matter_id)
+    perms, role, visible = await matter_perms(db, who, matter_id)
     if not visible:
         raise not_found("Matter")
     if perm not in perms:
@@ -101,30 +101,30 @@ def grantable_roles(who: Principal, perms: set[str], role: str | None) -> tuple[
 
 
 # Collections ------------------------------------------------------------------------
-def linked_matter_ids(db: Session, collection_id: str) -> list[str]:
-    return list(db.scalars(select(MatterCollection.matter_id).where(MatterCollection.collection_id == collection_id)))
+async def linked_matter_ids(db: AsyncSession, collection_id: str) -> list[str]:
+    return list(await db.scalars(select(MatterCollection.matter_id).where(MatterCollection.collection_id == collection_id)))
 
 
-def load_collection(db: Session, who: Principal, collection_id: str) -> Collection:
-    col = db.get(Collection, collection_id)
+async def load_collection(db: AsyncSession, who: Principal, collection_id: str) -> Collection:
+    col = await db.get(Collection, collection_id)
     if not col or col.firm_id != who.firm_id or col.deleted_at is not None:
         raise not_found("Collection")
     return col
 
 
-def collection_perms(db: Session, who: Principal, col: Collection) -> tuple[set[str], bool]:
+async def collection_perms(db: AsyncSession, who: Principal, col: Collection) -> tuple[set[str], bool]:
     """(permissions on this collection, visible?). Walled on ANY linked matter -> hidden."""
     if who.is_admin:
         return set(P.ALL_PERMISSIONS), True
     perms: set[str] = set()
-    matters = linked_matter_ids(db, col.id)
+    matters = await linked_matter_ids(db, col.id)
     for mid in matters:
-        mperms, role, visible = matter_perms(db, who, mid)
+        mperms, role, visible = await matter_perms(db, who, mid)
         if role == P.BLOCKED:
             return set(), False
         if visible:
             perms |= mperms
-    grant = db.get(CollectionGrant, (col.id, who.id))
+    grant = await db.get(CollectionGrant, (col.id, who.id))
     if grant:
         perms |= READ_PERMS | ({"documents.upload", "collections.update"} if grant.level == "write" else set())
     if not matters:
@@ -136,9 +136,9 @@ def collection_perms(db: Session, who: Principal, col: Collection) -> tuple[set[
     return perms, bool(perms)
 
 
-def authorize_collection(db: Session, who: Principal, perm: str, collection_id: str) -> tuple[Collection, set[str]]:
-    col = load_collection(db, who, collection_id)
-    perms, visible = collection_perms(db, who, col)
+async def authorize_collection(db: AsyncSession, who: Principal, perm: str, collection_id: str) -> tuple[Collection, set[str]]:
+    col = await load_collection(db, who, collection_id)
+    perms, visible = await collection_perms(db, who, col)
     if not visible:
         raise not_found("Collection")
     if perm not in perms:

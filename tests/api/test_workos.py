@@ -6,12 +6,13 @@ import json
 
 import httpx
 import pytest
+from sqlalchemy import select, update
 
 from pymicroservices.app.utilities.secrets_control import get_settings
 from pymicroservices.app.firm_models import Admin, IamUser
 from pymicroservices.app.security import crypto, providers
 from pymicroservices.app.security.providers import WorkOSProvider
-from tests.api.conftest import Api, SessionLocal
+from tests.api.conftest import Api, in_db
 
 PASSWORD = "Strong-Pass-2026"
 
@@ -114,10 +115,10 @@ def workos(monkeypatch):
         monkeypatch.setattr(settings, key, value)
     provider = WorkOSProvider("sk_test_fake", "client_fake", "https://api.workos.test", transport=httpx.MockTransport(fake))
     monkeypatch.setattr(providers, "_providers", {"workos": provider})
-    with SessionLocal() as db:  # seeded accounts carry dev-provider ids; WorkOS binds its own on first sign-in
-        db.query(IamUser).update({"provider_subject": None})
-        db.query(Admin).update({"provider_subject": None})
-        db.commit()
+    async def unbind(db):  # seeded accounts carry dev-provider ids; WorkOS binds its own on first sign-in
+        await db.execute(update(IamUser).values(provider_subject=None))
+        await db.execute(update(Admin).values(provider_subject=None))
+    in_db(unbind)
     return fake
 
 
@@ -134,8 +135,8 @@ def test_password_sign_in_on_our_page(workos):
     r = _login(api, "iam", "ava@morganlaw.test")
     assert r.json()["status"] == "success", r.text
     assert api.get("/api/me").json()["principal"]["role"] == "ATTORNEY"
-    with SessionLocal() as db:
-        assert db.query(IamUser).filter_by(email="ava@morganlaw.test").one().provider_subject == "user_ava"
+    assert in_db(lambda db: db.scalar(select(IamUser.provider_subject).where(IamUser.email == "ava@morganlaw.test"))) \
+        == "user_ava"
     assert _login(Api(), "iam", "ava@morganlaw.test", "wrong").json()["code"] == "INVALID_CREDENTIALS"
 
 
@@ -167,10 +168,10 @@ def test_unverified_email_gets_a_code_step(workos):
 
 def test_accept_invitation_on_our_page(workos):
     admin = Api("admin")
-    with SessionLocal() as db:  # admin invited nina earlier
-        firm_id = db.query(Admin).first().firm_id
+    async def invited(db):  # admin invited nina earlier
+        firm_id = await db.scalar(select(Admin.firm_id).limit(1))
         db.add(IamUser(firm_id=firm_id, email="nina@morganlaw.test", name="Nina", firm_role="PARALEGAL", status="invited"))
-        db.commit()
+    in_db(invited)
     info = admin.c.get("/api/auth/invitations/inv-tok").json()
     assert info["email"] == "nina@morganlaw.test" and info["console"] == "iam" and info["has_account"] is False
     nina = Api("iam")

@@ -12,8 +12,13 @@ from .secrets_control import Settings, get_settings
 class Database:
     def __init__(self, settings: Settings | None = None):
         settings = settings or get_settings()
-        # Same private schema as the firm tables; pgvector lives in `extensions` on Supabase.
-        connect_args = {'server_settings': {'search_path': f'"{settings.db_schema}", extensions, public'},
+        # Supabase: use the *session* pooler (port 5432); TLS is required and comes from sslmode.
+        # Prepared statements are off (asyncpg's statement cache and SQLAlchemy's), so a transaction
+        # pooler (6543) can't hand a connection a statement it never prepared.
+        # search_path is set per connection: every table lives in the configured schema, and
+        # pgvector lives in `extensions` on Supabase.
+        connect_args = {'statement_cache_size': 0, 'prepared_statement_cache_size': 0,
+                        'server_settings': {'search_path': f'"{settings.db_schema}", extensions, public'},
                         **settings.database_connect_args}
         # Tests drive the app from several event loops; pooled asyncpg connections can't cross loops.
         pooling = {'poolclass': NullPool} if settings.environment == 'test' else {

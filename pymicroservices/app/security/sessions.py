@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import Request, Response
 from sqlalchemy import select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from pymicroservices.app.utilities.secrets_control import get_settings
 from pymicroservices.app.firm_models import AuthSession
@@ -47,7 +47,7 @@ def set_csrf_cookie(response: Response) -> str:
     return token
 
 
-def create_session(db: Session, request: Request, response: Response, console: str, principal_id: str,
+async def create_session(db: AsyncSession, request: Request, response: Response, console: str, principal_id: str,
                    firm_id: str, refresh_token: str | None, provider_session_id: str | None = None) -> AuthSession:
     s = get_settings()
     token = crypto.random_token()
@@ -59,30 +59,30 @@ def create_session(db: Session, request: Request, response: Response, console: s
                       created_at=now, last_seen_at=now, last_verified_at=now,
                       expires_at=now + timedelta(hours=s.session_absolute_hours))
     db.add(row)
-    db.flush()
+    await db.flush()
     response.set_cookie(SESSION_COOKIES[console], token, httponly=True,
                         max_age=s.session_absolute_hours * 3600, **_cookie_kwargs())
     set_csrf_cookie(response)
     return row
 
 
-def load_session(db: Session, request: Request, console: str) -> AuthSession | None:
+async def load_session(db: AsyncSession, request: Request, console: str) -> AuthSession | None:
     token = request.cookies.get(SESSION_COOKIES[console])
     if not token:
         return None
-    row = db.scalar(select(AuthSession).where(AuthSession.token_hash == crypto.sha256(token),
-                                              AuthSession.console == console))
+    row = await db.scalar(select(AuthSession).where(AuthSession.token_hash == crypto.sha256(token),
+                                                    AuthSession.console == console))
     if not row or row.revoked_at is not None:
         return None
     now = _now()
     idle = timedelta(minutes=get_settings().session_idle_minutes)
     if _aware(row.expires_at) <= now or _aware(row.last_seen_at) + idle <= now:
         row.revoked_at = now
-        db.commit()
+        await db.commit()
         return None
     if now - _aware(row.last_seen_at) > timedelta(seconds=30):
         row.last_seen_at = now
-        db.commit()
+        await db.commit()
     return row
 
 
@@ -90,15 +90,15 @@ def needs_reverify(row: AuthSession) -> bool:
     return _now() - _aware(row.last_verified_at) > timedelta(minutes=get_settings().session_reverify_minutes)
 
 
-def revoke(db: Session, row: AuthSession) -> None:
+def revoke(db: AsyncSession, row: AuthSession) -> None:
     row.revoked_at = _now()
 
 
-def revoke_all(db: Session, console: str, principal_id: str) -> int:
-    result = db.execute(update(AuthSession)
-                        .where(AuthSession.console == console, AuthSession.principal_id == principal_id,
-                               AuthSession.revoked_at.is_(None))
-                        .values(revoked_at=_now()))
+async def revoke_all(db: AsyncSession, console: str, principal_id: str) -> int:
+    result = await db.execute(update(AuthSession)
+                              .where(AuthSession.console == console, AuthSession.principal_id == principal_id,
+                                     AuthSession.revoked_at.is_(None))
+                              .values(revoked_at=_now()))
     return result.rowcount or 0
 
 

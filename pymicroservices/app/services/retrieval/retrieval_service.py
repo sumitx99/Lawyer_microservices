@@ -17,30 +17,46 @@ from ...utilities.retrieval_models import ModelUnavailable
 
 NUMBER = r'\d+(?:\.\d+)*(?:[a-z])?(?:\(\d+\))*'
 REFERENCE_PATTERNS = [
-    ('section', rf'(?:\bsection\b|\bs\.|धारा)\s*({NUMBER})'),
+    ('section', rf'(?:\bsection\b|\bsec\b\.?|\bs\.|धारा)\s*({NUMBER})'),
     ('article', rf'\barticle\s+({NUMBER})'), ('clause', rf'\bclause\s+({NUMBER})'),
     ('order', rf'\border\s+({NUMBER})\s+rule\s+({NUMBER})'),
     ('case', r'\b(\d+)\s+of\s+(\d{4})')]
+# Postgres (ARE) spellings of each reference label; chunk labels use the same words (text_chunker LEGAL_MARKERS).
+LABELS = {'section': '(section|sec[.]?|s[.]|धारा)', 'article': '(article|अनुच्छेद)', 'clause': '(clause|खंड)'}
+# Clause and section numbers often stand alone in a clause path ("5.2", "138"); article numbers need their label.
+BARE_IN_PATH = {'section', 'clause'}
+DEVANAGARI_DIGITS, ASCII_DIGITS = '०१२३४५६७८९', '0123456789'
+END = r'(?![[:alnum:]_]|[.][0-9])'
 
 
 def references(query):
+    """Exact legal references in a query, each with a content regex and the clause-path element regexes it needs.
+
+    Numbers end at a boundary, so Section 138 never matches Section 1380 or 138.1."""
     query = ''.join(str(int(ch)) if ch.isdecimal() else ch for ch in query)
     found = []
     for kind, pattern in REFERENCE_PATTERNS:
         for match in re.finditer(pattern + r'(?![\w]|\.\d)', query, re.I):
             numbers = match.groups()
-            label = {'section': r'(section|s[.]|धारा)', 'article': 'article', 'clause': 'clause'}
-            if kind in label:
-                body = label[kind] + '[[:space:]]*' + re.escape(numbers[0])
+            if kind in LABELS:
+                body = LABELS[kind] + '[[:space:]]*' + re.escape(numbers[0])
+                label = f'({LABELS[kind]}[[:space:]]*)' + ('?' if kind in BARE_IN_PATH else '')
+                path = ['"' + label + re.escape(numbers[0]) + '"']
             elif kind == 'order':
                 body = 'order[[:space:]]+' + re.escape(numbers[0]) + '[[:space:]]+rule[[:space:]]+' + re.escape(numbers[1])
+                path = ['"order[[:space:]]*' + re.escape(numbers[0]) + '"', '"rule[[:space:]]*' + re.escape(numbers[1]) + '"']
             else:
                 body = re.escape(numbers[0]) + '[[:space:]]+of[[:space:]]+' + numbers[1]
-            ref = {'kind': kind, 'numbers': numbers,
-                   'pattern': r'(^|[^[:alnum:]_])' + body + r'(?![[:alnum:]_]|[.][0-9])'}
+                path = []
+            ref = {'kind': kind, 'numbers': numbers, 'pattern': r'(^|[^[:alnum:]_])' + body + END, 'path': path}
             if ref not in found:
                 found.append(ref)
     return found
+
+
+def ascii_digits(column):
+    """Devanagari digits read as ASCII, so धारा १३८ in a document matches Section 138."""
+    return func.translate(column, DEVANAGARI_DIGITS, ASCII_DIGITS)
 
 
 def fuse(lists, k=60, limit=50, has_references=False):
@@ -168,13 +184,14 @@ class RetrievalService:
             if refs:
                 direct, metadata = [], []
                 for ref in refs:
-                    body = node.content if kind == 'text' else node.description
+                    body = ascii_digits(node.content if kind == 'text' else node.description)
                     tests = [body.op('~*')(ref['pattern'])]
-                    if kind == 'text' and ref['kind'] != 'case':
-                        tests.append(and_(*[TextNode.node_metadata['legal_path'].contains([n]) for n in ref['numbers']]))
+                    if kind == 'text' and ref['path']:
+                        legal_path = ascii_digits(cast(TextNode.node_metadata['legal_path'], Text))
+                        tests.append(and_(*[legal_path.op('~*')(element) for element in ref['path']]))
                     direct.append(or_(*tests))
-                    metadata += [UnstructuredMetadata.case_number.op('~*')(ref['pattern']),
-                                 cast(UnstructuredMetadata.statutes_cited, Text).op('~*')(ref['pattern'])]
+                    metadata += [ascii_digits(UnstructuredMetadata.case_number).op('~*')(ref['pattern']),
+                                 ascii_digits(cast(UnstructuredMetadata.statutes_cited, Text)).op('~*')(ref['pattern'])]
                 direct_match = or_(*direct)
                 priority = case((direct_match, 0), else_=1)
                 rows = await session.execute(base.add_columns(priority.label('priority'))
@@ -293,7 +310,7 @@ class RetrievalService:
             query = base.where(TextNode.doc_id == node.doc_id)
             if request.whole_clause:
                 path = node.node_metadata.get('legal_path') or []
-                prefix = path[:2] if path and path[0] in {'Operative', 'Recital'} else path[:1]
+                prefix = (path[:2] if len(path) >= 2 else []) if path and path[0] in {'Operative', 'Recital'} else path[:1]
                 if prefix:
                     query = query.where(and_(*[TextNode.node_metadata['legal_path'][i].astext == value
                                                for i, value in enumerate(prefix)]))

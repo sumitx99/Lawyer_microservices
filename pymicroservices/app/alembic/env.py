@@ -1,9 +1,12 @@
 """Migrations for both table sets (firm/IAM tables and the RAG tables), one revision chain.
 
-Runs on the sync psycopg driver with runtime credentials; no secrets in alembic.ini. Every table
-lives in the private DB_SCHEMA (Supabase's Data API only exposes `public`)."""
+Runs on asyncpg (the service's only driver) with runtime credentials; no secrets in alembic.ini. Every table
+lives in DB_SCHEMA (default `public`, as before the firm API; set DB_SCHEMA for a private schema)."""
+import asyncio
+
 from alembic import context
-from sqlalchemy import create_engine, pool, text
+from sqlalchemy import pool, text
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.dialects.postgresql import REGCONFIG
 from sqlalchemy.dialects.postgresql.base import ischema_names
 
@@ -42,24 +45,29 @@ def _not_version_table(obj, name, type_, reflected, compare_to):
     return not (type_ == 'table' and name == 'alembic_version')
 
 
-def run_online():
-    engine = create_engine(settings.sync_database_url, poolclass=pool.NullPool, hide_parameters=True,
-                           connect_args={'prepare_threshold': None})
+def _migrate(connection):
+    _prepare_postgres(connection)
+    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True,
+                      version_table_schema=SCHEMA, include_object=_not_version_table)
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_online():
+    # No statement cache: migrations may run through a transaction pooler (Supabase).
+    engine = create_async_engine(settings.database_url, poolclass=pool.NullPool, hide_parameters=True,
+                                 connect_args={'statement_cache_size': 0, **settings.database_connect_args})
     try:
-        with engine.connect() as connection:
-            _prepare_postgres(connection)
-            context.configure(connection=connection, target_metadata=target_metadata, compare_type=True,
-                              version_table_schema=SCHEMA, include_object=_not_version_table)
-            with context.begin_transaction():
-                context.run_migrations()
+        async with engine.connect() as connection:
+            await connection.run_sync(_migrate)
     finally:
-        engine.dispose()
+        await engine.dispose()
 
 
 if context.is_offline_mode():
-    context.configure(url='postgresql+psycopg://localhost/unused', target_metadata=target_metadata,
+    context.configure(url='postgresql+asyncpg://localhost/unused', target_metadata=target_metadata,
                       literal_binds=True, dialect_opts={'paramstyle': 'named'})
     with context.begin_transaction():
         context.run_migrations()
 else:
-    run_online()
+    asyncio.run(run_online())

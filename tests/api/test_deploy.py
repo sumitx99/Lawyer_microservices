@@ -46,9 +46,8 @@ def test_postgres_and_storage_are_required():
         Settings(environment="staging", **{**HOSTED, "storage_secret_key": ""})
 
 
-def test_supabase_url_works_for_both_drivers():
+def test_supabase_url_works_with_asyncpg():
     s = Settings(environment="staging", **{**HOSTED, "database_url": "postgresql://u:p%40ss@db.example:5432/postgres?sslmode=require"})
-    assert s.sync_database_url.drivername == "postgresql+psycopg" and s.sync_database_url.query == {"sslmode": "require"}
     assert s.database_url.drivername == "postgresql+asyncpg" and s.database_url.password == "p@ss"
     assert not s.database_url.query and s.database_connect_args == {"ssl": "require"}
 

@@ -2,12 +2,13 @@
 first stage WAITING + one outbox message for the consumers. Access is the collection's."""
 import hashlib
 from datetime import datetime, timezone
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select, update
 
 from pymicroservices.app.models import OutboxEvent, UnstructuredData
-from tests.api.conftest import SessionLocal, as_admin, as_user, matter_id
+from tests.api.conftest import as_admin, as_user, in_db, matter_id
 
 PDF = b"%PDF-1.4 fictional record"
 STORE = None
@@ -41,11 +42,9 @@ def _collection(api) -> str:
 
 def _consumers_finish(doc_id: str):
     """What the consumers repository does when every stage succeeds."""
-    with SessionLocal() as db:
-        db.execute(update(UnstructuredData).where(UnstructuredData.id == doc_id).values(
-            standardization_status="COMPLETED", markdown_status="COMPLETED", image_status="INAPPLICABLE",
-            metaclassifier_status="COMPLETED"))
-        db.commit()
+    in_db(lambda db: db.execute(update(UnstructuredData).where(UnstructuredData.id == UUID(doc_id)).values(
+        standardization_status="COMPLETED", markdown_status="COMPLETED", image_status="INAPPLICABLE",
+        metaclassifier_status="COMPLETED")))
 
 
 def test_upload_flow_end_to_end():
@@ -56,11 +55,10 @@ def test_upload_flow_end_to_end():
     r = priya.post(f"/api/documents/{doc['id']}/complete")
     assert r.status_code == 200, r.text
     assert r.json()["document"]["status"] == "queued"
-    with SessionLocal() as db:
-        row = db.get(UnstructuredData, doc["id"])
-        assert str(row.thread_id) == col and row.standardization_status == "WAITING"
-        events = db.scalars(select(OutboxEvent)).all()
-        assert [(e.event_type, e.payload) for e in events] == [("thread.standardization", {"unstructured_thread_id": col})]
+    row = in_db(lambda db: db.get(UnstructuredData, UUID(doc["id"])))
+    assert str(row.thread_id) == col and row.standardization_status == "WAITING"
+    events = in_db(lambda db: db.scalars(select(OutboxEvent))).all()
+    assert [(e.event_type, e.payload) for e in events] == [("thread.standardization", {"unstructured_thread_id": col})]
     _consumers_finish(doc["id"])
     assert priya.get(f"/api/documents/{doc['id']}").json()["document"]["status"] == "ready"
     assert [d["id"] for d in priya.get(f"/api/collections/{col}/documents").json()["items"]] == [doc["id"]]
@@ -102,17 +100,14 @@ def test_failed_stage_can_be_retried():
     col = _collection(priya)
     doc = _upload(priya, col)
     priya.post(f"/api/documents/{doc['id']}/complete")
-    with SessionLocal() as db:
-        db.execute(update(UnstructuredData).where(UnstructuredData.id == doc["id"]).values(
-            standardization_status="FAILED", standardization_error="OCR crashed",
-            standardization_updated_at=datetime.now(timezone.utc)))
-        db.commit()
+    in_db(lambda db: db.execute(update(UnstructuredData).where(UnstructuredData.id == UUID(doc["id"])).values(
+        standardization_status="FAILED", standardization_error="OCR crashed",
+        standardization_updated_at=datetime.now(timezone.utc))))
     failed = priya.get(f"/api/documents/{doc['id']}").json()["document"]
     assert failed["status"] == "failed" and failed["error"] == "OCR crashed"
     assert priya.post(f"/api/documents/{doc['id']}/retry").json()["document"]["status"] == "queued"
-    with SessionLocal() as db:
-        assert db.scalar(select(OutboxEvent.event_type).order_by(OutboxEvent.created_at.desc()).limit(1)) == \
-            "thread.standardization"
+    assert in_db(lambda db: db.scalar(select(OutboxEvent.event_type).order_by(OutboxEvent.created_at.desc())
+                                      .limit(1))) == "thread.standardization"
 
 
 def test_walled_user_cannot_reach_documents():

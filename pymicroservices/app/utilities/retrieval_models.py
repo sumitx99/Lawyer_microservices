@@ -92,7 +92,10 @@ class Reranker:
                 device = self.settings.embedding_device
                 if device == 'auto':
                     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
-                self._tokenizer, self._model, self._device = tokenizer, model.to(device).eval(), device
+                # Half precision on GPUs halves memory and latency; CPUs have no fast fp16 path.
+                dtype = torch.float16 if device in ('cuda', 'mps') else torch.float32
+                self._tokenizer, self._device = tokenizer, device
+                self._model = model.to(device=device, dtype=dtype).eval()
             except (ImportError, OSError):
                 raise ModelUnavailable('Reranker model or dependencies are unavailable locally.') from None
 

@@ -6,6 +6,7 @@
 
 Object storage is an in-memory stand-in for the S3 calls the folder services make; Kafka (outbox)
 and the upload cleanup loop are off, and Valkey points at a closed port (progress pings are best effort)."""
+import asyncio
 import base64
 import hashlib
 import os
@@ -45,12 +46,13 @@ os.environ.update(DATABASE_URL=TEST_DB, DB_SCHEMA=TEST_SCHEMA, ENVIRONMENT="test
 import httpx  # noqa: E402
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import text  # noqa: E402
+from sqlalchemy import select, text  # noqa: E402
 
 from pymicroservices.app import main  # noqa: E402
 from pymicroservices.app.models import Base as RagBase  # noqa: E402
 from pymicroservices.app.security import crypto  # noqa: E402
-from pymicroservices.app.utilities.firm_db import FirmBase, SessionLocal, engine  # noqa: E402
+from pymicroservices.app.utilities.firm_db import FirmBase  # noqa: E402
+from pymicroservices.app.utilities.postgresql_helper import Database  # noqa: E402
 from pymicroservices.app.utilities.storage_helper import StoredObject  # noqa: E402
 from scripts import seed_dev  # noqa: E402
 
@@ -59,23 +61,38 @@ METADATA = (FirmBase.metadata, RagBase.metadata)
 TABLES = ", ".join(f'"{TEST_SCHEMA}"."{t.name}"' for m in METADATA for t in m.sorted_tables)
 
 
+def in_db(work):
+    """Run `work(db)` (a coroutine function) in one committed transaction and return its result.
+    The tests are sync and the app is async, so each call gets its own event loop."""
+    async def run():
+        database = Database()
+        try:
+            async with database.transaction() as db:
+                return await work(db)
+        finally:
+            await database.close()
+    return asyncio.run(run())
+
+
+async def _create_schema(db):
+    await db.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    await db.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE'))
+    await db.execute(text(f'CREATE SCHEMA "{TEST_SCHEMA}"'))
+    connection = await db.connection()
+    for metadata in METADATA:  # no checkfirst: `public` (on the search path) may hold the dev tables
+        await connection.run_sync(metadata.create_all, checkfirst=False)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def test_schema():
-    with engine.begin() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        conn.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE'))
-        conn.execute(text(f'CREATE SCHEMA "{TEST_SCHEMA}"'))
-    for metadata in METADATA:
-        metadata.create_all(engine)
+    in_db(_create_schema)
     yield
-    with engine.begin() as conn:
-        conn.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE'))
+    in_db(lambda db: db.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE')))
 
 
 @pytest.fixture(autouse=True)
 def fresh_db(test_schema):
-    with engine.begin() as conn:
-        conn.execute(text(f"TRUNCATE {TABLES} RESTART IDENTITY CASCADE"))
+    in_db(lambda db: db.execute(text(f"TRUNCATE {TABLES} RESTART IDENTITY CASCADE")))
     seed_dev.main()
     yield
 
@@ -194,18 +211,16 @@ def as_admin() -> Api:
 
 def matter_id(name: str) -> str:
     from pymicroservices.app.firm_models import Matter
-    with SessionLocal() as db:
-        return db.query(Matter).filter_by(name=name).one().id
+    return in_db(lambda db: db.scalar(select(Matter.id).where(Matter.name == name)))
 
 
 def user_id(email: str) -> str:
     from pymicroservices.app.firm_models import IamUser
-    with SessionLocal() as db:
-        return db.query(IamUser).filter_by(email=email).one().id
+    return in_db(lambda db: db.scalar(select(IamUser.id).where(IamUser.email == email)))
 
 
 def totp_for(console: str, email: str) -> str:
     from pymicroservices.app.firm_models import DevIdentity
-    with SessionLocal() as db:
-        ident = db.query(DevIdentity).filter_by(console=console, email=email).one()
-        return crypto.totp(ident.mfa_secret)
+    secret = in_db(lambda db: db.scalar(select(DevIdentity.mfa_secret).where(DevIdentity.console == console,
+                                                                              DevIdentity.email == email)))
+    return crypto.totp(secret)

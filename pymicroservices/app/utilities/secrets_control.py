@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     postgres_password: SecretStr = SecretStr('')
     # Every table lives in this schema. Kept out of `public` so Supabase's Data API
     # (which exposes `public` to the publishable key) can never reach it.
-    db_schema: str = 'lexaior'
+    db_schema: str = 'public'
     db_pool_size: int = Field(default=5, ge=1, le=50)
     db_max_overflow: int = Field(default=5, ge=0, le=50)
     db_pool_pre_ping: bool = True  # tests turn it off for speed
@@ -178,19 +178,13 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> URL:
-        """Async (asyncpg) URL used by the RAG services. asyncpg takes TLS via connect args, not the URL."""
+        """Async (asyncpg) URL for the API, scripts and migrations. asyncpg takes TLS via connect args, not the URL."""
         return self._url('postgresql+asyncpg')[0]
 
     @property
     def database_connect_args(self) -> dict:
         sslmode = self._url('postgresql+asyncpg')[1].get('sslmode')
         return {'ssl': sslmode} if sslmode and sslmode not in {'disable', 'allow', 'prefer'} else {}
-
-    @property
-    def sync_database_url(self) -> URL:
-        """Sync (psycopg 3) URL used by the firm/IAM routes, scripts and migrations."""
-        url, query = self._url('postgresql+psycopg')
-        return url.set(query=query)
 
     @property
     def dev_auth(self) -> bool:
